@@ -1,4 +1,3 @@
-export ES_EMBEDDING_MODEL_ID="<Elasticsearch Embedding Model"
 export ES_CLOUD_ID="<Elastic Cloud Id>"
 export ES_INDEX="<Elastic Index Name>"
 export ES_USERNAME="<Elastic User Name>"
