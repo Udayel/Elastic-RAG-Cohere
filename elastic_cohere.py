@@ -14,25 +14,16 @@ import boto3
 import botocore
 from cohere_sagemaker import Client
 
-# AWS / Cohere Settings
+#Environment variables
 cohere_light_endpoint_name = os.environ["COHERE_LIGHT_ENDPOINT"]
 aws_region = os.environ["AWS_REGION"]
-max_tokens=2048
-max_context_tokens=4000
-safety_margin=5
-
-### Elastic Settings
-
-#cluster Settings
 cid = os.environ['ES_CLOUD_ID']
 cp = os.environ['ES_PASSWORD']
 cu = os.environ['ES_USERNAME']
-
-# ES Datsets Options
-ES_DATASETS = {
-        'Elastic Documentation' : 'search-elastic-docs',
-        }
-
+index_name = os.environ['ES_INDEX']
+max_tokens=1024
+max_context_tokens=4000
+safety_margin=5
 
 ###cohere start
 
@@ -79,53 +70,50 @@ def es_connect(cid, user, passwd):
     return es
 
 # Search ElasticSearch index and return body and URL of the result
-def search(query_text, index_name):
-
-
-    print("Query text is", query_text)
+def search(query_text):
     es = es_connect(cid, cu, cp)
-
-    # Elasticsearch query (BM25) and kNN configuration for hybrid search
-    query = {
-        "bool": {
-            "must": [{
-                "match": {
-                    "title": {
-                        "query": query_text,
-                        "boost": 1
-                    }
-                }
-            }]
-        }
-    }
-
-    knn = {
-        "field": "title-vector",
-        "k": 1,
-        "num_candidates": 20,
-        "query_vector_builder": {
-            "text_embedding": {
-                "model_id": "sentence-transformers__all-distilroberta-v1",
-                "model_text": query_text
-            }
-        },
-        "boost": 24
-    }
-
-    fields = ["title", "body_content", "url"]
     index = index_name
-    resp = es.search(index=index,
+    
+    '''Using ELSER -
+       Search ElasticSearch index and return body and URL of the result'''
+
+    query = {
+      "bool": {
+        "should": [
+          {
+            "match": {
+              "text": {
+                "query": query_text,
+                "boost": 0.01
+              }
+            }
+          },
+          {
+            "text_expansion": {
+              "ml.inference.text_expanded.predicted_value": {
+                "model_id": ".elser_model_1",
+                "model_text": query_text
+              }
+            }
+          }
+        ]
+      }
+    }
+
+    fields = ["text",]
+
+#   index = index_name
+    resp = es.search(index=index_name,
                      query=query,
-                     knn=knn,
                      fields=fields,
                      size=1,
                      source=False)
 
-    body = resp['hits']['hits'][0]['fields']['body_content'][0]
-    url = resp['hits']['hits'][0]['fields']['url'][0]
+    body = resp['hits']['hits'][0]['fields']['text'][0]
+
+    url=''
 
     return body, url
-
 def truncate_text(text, max_tokens):
     tokens = text.split()
     if len(tokens) <= max_tokens:
@@ -134,97 +122,48 @@ def truncate_text(text, max_tokens):
     return ' '.join(tokens[:max_tokens])
 
 
-def toLLM(query,
-        llm_model,
-        index=False,
-    ):
+st.title("Anycompany AI Assistant")
 
-    # Set prompt and add ES contest if required
-    if index:
-        resp, url = search(query, ES_DATASETS[es_index])
-        resp = truncate_text(resp, max_context_tokens - max_tokens - safety_margin)
-        prompt = f"Answer this question: {query}\n using only the information from this Elastic Doc: {resp}"
-        with st.expander("Source Document From Elasticsearch"):
-            st.markdown(resp)
-    else:
-        prompt = f"Answer this question: {query}"
-    print('prompt is: ',prompt)
+with st.sidebar.expander("⚙️", expanded=True):
+    llm_model = st.selectbox(label='Choose Large Language Model', options=LLM_LIST)
+    with_context = st.checkbox('With Context')
 
 
-    # Call LLM
+print("Selected LLM Model is:",llm_model)
+print("Selected Context Option is:",with_context)
+
+# Main chat form
+with st.form("chat_form"):
+    query = st.text_input("You: ")
+    submit_button = st.form_submit_button("Send")
+
+
+# Generate and display response on form submission
+negResponse = "I'm unable to answer the question based on the information I have from Context."
+
+if submit_button:
+    resp, url = search(query)
+    resp = truncate_text(resp, max_context_tokens - max_tokens - safety_margin)
+    prompt_with_context = f"Answer this question: {query}\n using only the information from this Elastic Doc: {resp}\n"
+
+    prompt = query
+
+    if with_context:
+        prompt = prompt_with_context
+    print('prompt is:',prompt)
+
+
     if llm_model == "Cohere-light":
-        response = co.generate(prompt=prompt, max_tokens=1024, temperature=0.9, return_likelihoods='GENERATION')
+        response = co.generate(prompt=prompt, max_tokens=100, temperature=0.9, return_likelihoods='GENERATION')
         answer = response.generations[0].text
     else:
         answer = "Not available. Please select LLM"
 
     print("Answer is",answer)
 
+    ####stopping here
 
-    # Print respose
-    if index:
-        if negResponse in answer:
-            st.markdown(f"AI: {answer.strip()}")
-        else:
-            st.markdown(f"AI: {answer.strip()}\n\nDocs: {url}")
+    if negResponse in answer:
+        st.write(f"AI: {answer.strip()}")
     else:
-        st.markdown(f"AI: {answer.strip()}")
-
-
-## Main
-st.set_page_config(
-     page_title="AI Assistant",
-     page_icon="🧠",
-#     layout="wide"
-)
-
-
-st.sidebar.markdown("""
- <style>
-     [data-testid=stSidebar] [data-testid=stImage]{
-         text-align: center;
-         display: block;
-         margin-left: auto;
-         margin-right: auto;
-         width: 100%;
-     }
- </style>
- """, unsafe_allow_html=True)
-
-st.title("ElasticAWSJam AI Assistant")
-
-with st.sidebar.expander("Assistant Options", expanded=True):
-    es_index = st.selectbox(label='Select Your Dataset for Context', options=ES_DATASETS.keys())
-    llm_model = st.selectbox(label='Choose Large Language Model', options=LLM_LIST)
-
-
-print("Selected LLM Model is:",llm_model)
-
-# Streamlit Form
-st.markdown("""
-        <style>
-        .small-font {
-            font-size:12px !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-st.markdown('<p class="small-font">Example Searches:</p>', unsafe_allow_html=True)
-st.markdown('<p class="small-font">Show me the API call for a redact processor<br>I want to secure my elastic cluster<br>run Elasticsearch with security enabled</p>', unsafe_allow_html=True)
-with st.form("chat_form"):
-    query = st.text_input("What can I help you with: ")
-    b1, b2 = st.columns(2)
-    with b1:
-        search_no_context = st.form_submit_button("Search Without Context")
-    with b2:
-        search_context = st.form_submit_button("Search With Context")
-
-
-# Generate and display response on form submission
-negResponse = "I'm unable to answer the question based on the information I have from Context."
-
-if search_no_context:
-    toLLM(query, llm_model)
-
-if search_context:
-    toLLM(query, llm_model, ES_DATASETS[es_index])
+        st.write(f"AI: {answer.strip()}\n\nDocs: {url}")
