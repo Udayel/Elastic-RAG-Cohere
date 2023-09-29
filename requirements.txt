@@ -1,0 +1,6 @@
+streamlit
+elasticsearch
+jinja2
+boto3
+langchain
+cohere-sagemaker
